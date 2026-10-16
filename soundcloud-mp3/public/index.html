@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoundCloud to MP3</title>
+  <meta name="description" content="Paste a SoundCloud track link and download it as an MP3.">
+  <style>
+    :root {
+      --bg: #f6f5f3;
+      --surface: #ffffff;
+      --ink: #1c1b1a;
+      --muted: #6a6762;
+      --line: #e3e0db;
+      --accent: #e8450e;
+      --accent-ink: #ffffff;
+      --danger-bg: #fdeceb;
+      --danger-ink: #a3261a;
+      --warn-bg: #fff4dc;
+      --warn-ink: #7a5200;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141413;
+        --surface: #1e1d1c;
+        --ink: #f1efec;
+        --muted: #9d9992;
+        --line: #33312e;
+        --accent: #ff6a35;
+        --accent-ink: #1a0a03;
+        --danger-bg: #3a1714;
+        --danger-ink: #ff9d92;
+        --warn-bg: #3a2c0d;
+        --warn-ink: #ffd279;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      justify-content: center;
+      padding: 48px 16px;
+    }
+    main { width: 100%; max-width: 560px; }
+    h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+    .lede { margin: 0 0 24px; color: var(--muted); }
+
+    form { display: flex; gap: 8px; }
+    input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      padding: 12px 14px;
+      font: inherit;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    input[type="text"]::placeholder { color: var(--muted); }
+    button, .btn {
+      font: inherit;
+      font-weight: 600;
+      padding: 12px 18px;
+      color: var(--accent-ink);
+      background: var(--accent);
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      text-align: center;
+    }
+    button:disabled { opacity: 0.6; cursor: progress; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+    .message {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--danger-bg);
+      color: var(--danger-ink);
+    }
+    .message.warn { background: var(--warn-bg); color: var(--warn-ink); }
+
+    .card {
+      margin-top: 24px;
+      display: flex;
+      gap: 16px;
+      padding: 16px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .art {
+      flex: none;
+      width: 104px;
+      height: 104px;
+      border-radius: 8px;
+      background: var(--line);
+      object-fit: cover;
+    }
+    .meta { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+    .title { margin: 0; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+    .sub { margin: 0; color: var(--muted); font-size: 0.95rem; overflow-wrap: anywhere; }
+    .actions { margin-top: 12px; }
+    [hidden] { display: none !important; }
+
+    footer { margin-top: 32px; color: var(--muted); font-size: 0.875rem; }
+
+    @media (max-width: 480px) {
+      body { padding-top: 32px; }
+      form { flex-direction: column; }
+      .card { flex-direction: column; }
+      .art { width: 160px; height: 160px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SoundCloud to MP3</h1>
+    <p class="lede">Paste a link to a track, check the preview, then download the MP3.</p>
+
+    <form id="form" novalidate>
+      <input id="url" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+             placeholder="https://soundcloud.com/artist/track" aria-label="SoundCloud track link">
+      <button id="go" type="submit">Get MP3</button>
+    </form>
+
+    <div id="message" class="message" role="alert" hidden></div>
+
+    <section id="card" class="card" aria-live="polite" hidden>
+      <img id="art" class="art" alt="" width="104" height="104">
+      <div class="meta">
+        <p id="title" class="title"></p>
+        <p id="artist" class="sub"></p>
+        <p id="duration" class="sub"></p>
+        <div class="actions">
+          <a id="download" class="btn" download>Download MP3</a>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Only download tracks you made, tracks with a Creative Commons licence, or tracks you have permission to use.
+      SoundCloud's terms and the artist's copyright still apply. Playlists, private tracks and
+      30 second Go+ previews do not work.
+    </footer>
+  </main>
+
+  <script>
+    (function () {
+      var form = document.getElementById('form');
+      var input = document.getElementById('url');
+      var goBtn = document.getElementById('go');
+      var message = document.getElementById('message');
+      var card = document.getElementById('card');
+      var art = document.getElementById('art');
+      var titleEl = document.getElementById('title');
+      var artistEl = document.getElementById('artist');
+      var durationEl = document.getElementById('duration');
+      var download = document.getElementById('download');
+      var latest = 0;
+
+      function showMessage(text, isWarn) {
+        message.textContent = text;
+        message.classList.toggle('warn', Boolean(isWarn));
+        message.hidden = false;
+      }
+
+      function formatDuration(ms) {
+        if (!ms) return '';
+        var total = Math.round(ms / 1000);
+        var h = Math.floor(total / 3600);
+        var m = Math.floor((total % 3600) / 60);
+        var s = String(total % 60).padStart(2, '0');
+        return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + s : m + ':' + s;
+      }
+
+      function showCard(info, url) {
+        titleEl.textContent = info.title;
+        artistEl.textContent = info.artist || '';
+        durationEl.textContent = formatDuration(info.durationMs);
+        if (info.artwork) {
+          art.src = info.artwork;
+          art.hidden = false;
+        } else {
+          art.hidden = true;
+        }
+        if (info.downloadable) {
+          download.href = '/api/download?url=' + encodeURIComponent(url);
+          download.textContent = 'Download MP3';
+          download.hidden = false;
+        } else {
+          download.hidden = true;
+          showMessage(info.reason || 'This track cannot be downloaded.', true);
+        }
+        card.hidden = false;
+      }
+
+      art.addEventListener('error', function () { art.hidden = true; });
+
+      download.addEventListener('click', function () {
+        download.textContent = 'Starting download...';
+        setTimeout(function () { download.textContent = 'Download MP3'; }, 4000);
+      });
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var url = input.value.trim();
+        message.hidden = true;
+        card.hidden = true;
+        if (!url) {
+          showMessage('Paste a SoundCloud track link first.');
+          return;
+        }
+
+        var id = ++latest;
+        goBtn.disabled = true;
+        goBtn.textContent = 'Looking up...';
+
+        fetch('/api/info?url=' + encodeURIComponent(url))
+          .then(function (res) {
+            return res.json().catch(function () { return {}; }).then(function (data) {
+              if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+              return data;
+            });
+          })
+          .then(function (info) {
+            if (id === latest) showCard(info, url);
+          })
+          .catch(function (err) {
+            if (id === latest) showMessage(err.message || 'Something went wrong. Try again.');
+          })
+          .then(function () {
+            if (id === latest) {
+              goBtn.disabled = false;
+              goBtn.textContent = 'Get MP3';
+            }
+          });
+      });
+
+      // Pasting a link starts the lookup straight away.
+      input.addEventListener('paste', function () {
+        setTimeout(function () {
+          if (input.value.trim()) form.requestSubmit();
+        }, 0);
+      });
+    })();
+  </script>
+</body>
+</html>

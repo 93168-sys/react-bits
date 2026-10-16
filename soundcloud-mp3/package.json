@@ -1,0 +1,12 @@
+{
+  "name": "soundcloud-mp3",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paste a SoundCloud track link, get an MP3. Static page plus Vercel serverless functions.",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
