@@ -24,6 +24,17 @@ There are no dependencies and no build step.
 
 If the repo has this project inside a subfolder, set **Root Directory** to that folder on the import screen.
 
+## Run it on your own computer with a Cloudflare tunnel
+
+This gives a public `https://something.trycloudflare.com` link without Vercel. It only works while your computer is on and both terminals below stay open.
+
+1. Install [Node.js](https://nodejs.org) (the LTS version) and `cloudflared`. On Windows run `winget install --id Cloudflare.cloudflared`. On a Mac run `brew install cloudflared`.
+2. Get this folder, then open a terminal inside it.
+3. Terminal one: `npm start`. It prints `SoundCloud to MP3 is running at http://localhost:3000`. Leave it running.
+4. Terminal two: `cloudflared tunnel --url http://localhost:3000`. After a few seconds it prints a line with `https://....trycloudflare.com`. That is your link.
+
+The address changes every time you start the tunnel. Anyone who has the link can use the downloader while it runs, so only share it with people you mean to. `dev/server.js` is only for this. Vercel does not use it.
+
 ## What works and what does not
 
 - Works: public tracks that SoundCloud streams in full, and public playlists, sets and albums made of them.
