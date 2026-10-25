@@ -8,6 +8,7 @@ const API_ORIGIN = 'https://api-v2.soundcloud.com';
 const PAGE_HOSTS = new Set(['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com']);
 const REQUEST_TIMEOUT_MS = 15000;
 const SEGMENT_CONCURRENCY = 4;
+const MAX_PLAYLIST_TRACKS = 50;
 
 class ScError extends Error {
   constructor(message, status = 400) {
@@ -162,16 +163,20 @@ async function expandShortLink(u) {
   return parseTrackUrl(new URL(location, u).toString());
 }
 
-async function resolveTrack(input) {
+const NOT_FOUND = 'SoundCloud could not find that track. It may be private or deleted.';
+
+// Looks up whatever the link points at: a track, a playlist, a profile...
+async function resolveLink(input) {
   const page = await expandShortLink(parseTrackUrl(input));
   const res = await apiGet('/resolve', { url: page.toString() });
 
-  if (res.status === 404) {
-    throw new ScError('SoundCloud could not find that track. It may be private or deleted.', 404);
-  }
+  if (res.status === 404) throw new ScError(NOT_FOUND, 404);
   if (!res.ok) throw new ScError(`SoundCloud answered with an error (${res.status}).`, 502);
+  return res.json();
+}
 
-  const data = await res.json();
+async function resolveTrack(input) {
+  const data = await resolveLink(input);
   if (data.kind === 'playlist') {
     throw new ScError('That is a playlist or set link. Paste the link to a single track instead.');
   }
@@ -179,6 +184,33 @@ async function resolveTrack(input) {
     throw new ScError('That link is not a track. Paste the link to a single track.');
   }
   return data;
+}
+
+async function resolveTrackById(id) {
+  if (!/^\d{1,20}$/.test(String(id ?? ''))) throw new ScError('That is not a valid track id.');
+  const res = await apiGet(`/tracks/${id}`);
+
+  if (res.status === 404) throw new ScError(NOT_FOUND, 404);
+  if (!res.ok) throw new ScError(`SoundCloud answered with an error (${res.status}).`, 502);
+
+  const data = await res.json();
+  if (data.kind !== 'track') throw new ScError(NOT_FOUND, 404);
+  return data;
+}
+
+// A playlist only carries full details for its first few tracks. The rest are
+// bare ids, so ask for them in batches. Order follows the playlist.
+async function loadPlaylistTracks(playlist) {
+  const entries = (playlist.tracks ?? []).filter(Boolean).slice(0, MAX_PLAYLIST_TRACKS);
+  const missing = entries.filter((t) => !t.media).map((t) => t.id);
+
+  const byId = new Map();
+  for (let i = 0; i < missing.length; i += 50) {
+    const res = await apiGet('/tracks', { ids: missing.slice(i, i + 50).join(',') });
+    if (!res.ok) throw new ScError(`SoundCloud answered with an error (${res.status}).`, 502);
+    for (const track of await res.json()) byId.set(track.id, track);
+  }
+  return entries.map((t) => (t.media ? t : byId.get(t.id))).filter(Boolean);
 }
 
 // Chooses which stream to download: a full-length MP3, progressive first
@@ -212,24 +244,61 @@ function upgradeArtwork(artworkUrl) {
   }
 }
 
-function describeTrack(track) {
-  let downloadable = true;
-  let reason = null;
+function checkDownloadable(track) {
   try {
     pickTranscoding(track);
+    return { downloadable: true, reason: null };
   } catch (err) {
     if (!(err instanceof ScError)) throw err;
-    downloadable = false;
-    reason = err.message;
+    return { downloadable: false, reason: err.message };
   }
+}
+
+function trackFileBase(track) {
+  const title = track.title || 'Untitled track';
+  return track.user?.username ? `${track.user.username} - ${title}` : title;
+}
+
+function describeTrack(track) {
   return {
+    kind: 'track',
     title: track.title || 'Untitled track',
     artist: track.user?.username || null,
     artwork: upgradeArtwork(track.artwork_url || track.user?.avatar_url),
     durationMs: track.full_duration ?? track.duration ?? null,
-    downloadable,
-    reason,
+    ...checkDownloadable(track),
   };
+}
+
+function describePlaylist(playlist, tracks) {
+  const listed = (playlist.tracks ?? []).filter(Boolean);
+  const firstArt = tracks.find((t) => t.artwork_url)?.artwork_url;
+  return {
+    kind: 'playlist',
+    title: playlist.title || 'Untitled playlist',
+    artist: playlist.user?.username || null,
+    artwork: upgradeArtwork(playlist.artwork_url || firstArt || playlist.user?.avatar_url),
+    zipName: safeFilename(playlist.title || 'playlist') + '.zip',
+    totalTracks: playlist.track_count ?? listed.length,
+    truncated: listed.length > MAX_PLAYLIST_TRACKS,
+    tracks: tracks.map((track, index) => ({
+      id: track.id,
+      position: index + 1,
+      title: track.title || 'Untitled track',
+      artist: track.user?.username || null,
+      durationMs: track.full_duration ?? track.duration ?? null,
+      filename: safeFilename(trackFileBase(track)) + '.mp3',
+      ...checkDownloadable(track),
+    })),
+  };
+}
+
+// What the page shows after a link is pasted: one track or a whole playlist.
+async function lookup(input) {
+  const data = await resolveLink(input);
+  if (data.kind === 'track') return describeTrack(data);
+  if (data.kind === 'playlist') return describePlaylist(data, await loadPlaylistTracks(data));
+  throw new ScError('That link is not a track or a playlist.');
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +438,10 @@ module.exports = {
   ScError,
   parseTrackUrl,
   resolveTrack,
+  resolveTrackById,
+  lookup,
+  trackFileBase,
+  MAX_PLAYLIST_TRACKS,
   pickTranscoding,
   describeTrack,
   upgradeArtwork,

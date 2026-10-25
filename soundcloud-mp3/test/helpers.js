@@ -12,7 +12,13 @@ function id3Tag(payloadSize = 6) {
   return Buffer.concat([header, Buffer.alloc(payloadSize, 0x01)]);
 }
 
-function installFakeSoundCloud({ track, segments = [], progressiveBody = null, onRequest = () => {} }) {
+function installFakeSoundCloud({
+  track,
+  tracksById = {},
+  segments = [],
+  progressiveBody = null,
+  onRequest = () => {},
+}) {
   const realFetch = globalThis.fetch;
 
   globalThis.fetch = async (input) => {
@@ -28,6 +34,14 @@ function installFakeSoundCloud({ track, segments = [], progressiveBody = null, o
     if (url.origin === 'https://api-v2.soundcloud.com') {
       if (url.searchParams.get('client_id') !== CLIENT_ID) return new Response('nope', { status: 401 });
       if (url.pathname === '/resolve') return Response.json(track);
+      if (url.pathname === '/tracks') {
+        const ids = (url.searchParams.get('ids') || '').split(',');
+        return Response.json(ids.map((id) => tracksById[id]).filter(Boolean));
+      }
+      const one = /^\/tracks\/(\d+)$/.exec(url.pathname);
+      if (one) {
+        return tracksById[one[1]] ? Response.json(tracksById[one[1]]) : new Response('gone', { status: 404 });
+      }
       if (url.pathname.endsWith('/stream/progressive')) {
         return Response.json({ url: 'https://cf-media.sndcdn.com/file.mp3' });
       }

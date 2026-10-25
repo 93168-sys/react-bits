@@ -1,13 +1,18 @@
 # SoundCloud to MP3
 
-Paste a SoundCloud track link, see the artwork and title, download the MP3.
+Paste a SoundCloud track link, see the artwork and title, download the MP3. Paste a playlist link and download every track in one ZIP.
 
-One static page (`public/index.html`) and two Vercel serverless functions:
+One static page (`public/`) and two Vercel serverless functions:
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/info?url=...` | Looks the track up and returns title, artist, artwork, length and whether it can be downloaded |
-| `GET /api/download?url=...` | Streams the track back as an `.mp3` file named `Artist - Title.mp3` |
+| `GET /api/info?url=...` | Looks up a track or playlist and returns title, artist, artwork, length and whether each track can be downloaded. For a playlist it lists the tracks (up to 50). |
+| `GET /api/download?url=...` | Streams one track back as an `.mp3` file named `Artist - Title.mp3` |
+| `GET /api/download?id=...` | Same, for a track id. The playlist ZIP uses this. |
+
+### How playlist ZIPs work
+
+The server never builds the ZIP. A playlist of 15 songs would not finish inside Vercel's 60 second function limit. Instead the page asks `/api/download?id=...` for one track at a time, each as its own short function call, and packs the files into a ZIP in the browser (`public/zip.js`, no library). Keep the tab open until the ZIP is saved.
 
 There are no dependencies and no build step.
 
@@ -21,8 +26,9 @@ If the repo has this project inside a subfolder, set **Root Directory** to that 
 
 ## What works and what does not
 
-- Works: public tracks that SoundCloud streams in full.
-- Fails with a message: playlists and sets, profile links, private tracks, and Go+ tracks that SoundCloud only previews for 30 seconds.
+- Works: public tracks that SoundCloud streams in full, and public playlists, sets and albums made of them.
+- Playlists: the first 50 tracks are listed and zipped. Tracks that cannot be downloaded are skipped and marked in the list. A 50 track ZIP of normal songs needs roughly 200 MB of free browser memory, so a phone may struggle with the biggest ones. Each track also has its own MP3 button.
+- Fails with a message: profile links, private tracks, and Go+ tracks that SoundCloud only previews for 30 seconds.
 - Fails with a message: tracks that only exist as Opus or AAC. The server cannot convert audio, so it only serves tracks that SoundCloud already offers as MP3.
 - Short `on.soundcloud.com` links are followed.
 

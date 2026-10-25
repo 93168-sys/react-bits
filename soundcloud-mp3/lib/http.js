@@ -2,8 +2,8 @@
 
 const { ScError } = require('./soundcloud');
 
-function getUrlParam(req) {
-  return new URL(req.url, 'http://localhost').searchParams.get('url');
+function getParam(req, name) {
+  return new URL(req.url, 'http://localhost').searchParams.get(name);
 }
 
 function sendJson(res, status, body) {
@@ -33,4 +33,4 @@ function allowGet(req, res) {
   return false;
 }
 
-module.exports = { getUrlParam, sendJson, sendError, allowGet };
+module.exports = { getParam, sendJson, sendError, allowGet };

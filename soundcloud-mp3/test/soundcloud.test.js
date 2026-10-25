@@ -198,6 +198,7 @@ test('GET /api/info returns the preview card data', async () => {
     const res = await get(server.address().port, '/api/info?url=' + encodeURIComponent('https://soundcloud.com/a/b'));
     assert.equal(res.status, 200);
     assert.deepEqual(JSON.parse(res.body), {
+      kind: 'track',
       title: 'My Song / Remix',
       artist: 'Some Artist',
       artwork: 'https://i1.sndcdn.com/artworks-abc-t500x500.jpg',
@@ -263,6 +264,148 @@ test('GET /api/download answers with a JSON error instead of a broken file', asy
     const res = await get(server.address().port, '/api/download?url=' + encodeURIComponent('https://soundcloud.com/a/b'));
     assert.equal(res.status, 422);
     assert.match(res.headers['content-type'], /application\/json/);
+  } finally {
+    server.close();
+    restore();
+  }
+});
+
+// --- playlists ------------------------------------------------------------
+
+function playlistFixture(trackCount, { fullCount = 1 } = {}) {
+  const tracksById = {};
+  const stubs = [];
+  for (let i = 1; i <= trackCount; i++) {
+    const t = makeTrack(i === 3 ? [{ ...hlsMp3, snipped: true }] : [hlsMp3], {
+      id: i,
+      title: `Song ${i}`,
+      user: { username: i === 2 ? 'Other Artist' : 'Some Artist' },
+    });
+    tracksById[i] = t;
+    stubs.push(i <= fullCount ? t : { id: i, kind: 'track' }); // later tracks arrive as bare ids
+  }
+  const playlist = {
+    kind: 'playlist',
+    title: 'My: Playlist?',
+    user: { username: 'List Owner' },
+    artwork_url: null,
+    track_count: trackCount,
+    tracks: stubs,
+  };
+  return { playlist, tracksById };
+}
+
+test('lookup lists playlist tracks in order, filling in bare track ids', async () => {
+  sc.resetClientIdCache();
+  const { playlist, tracksById } = playlistFixture(4);
+  const batches = [];
+  const restore = installFakeSoundCloud({
+    track: playlist,
+    tracksById,
+    onRequest: (url) => {
+      if (url.pathname === '/tracks') batches.push(url.searchParams.get('ids'));
+    },
+  });
+  try {
+    const info = await sc.lookup('https://soundcloud.com/list-owner/sets/my-playlist');
+    assert.equal(info.kind, 'playlist');
+    assert.equal(info.title, 'My: Playlist?');
+    assert.equal(info.zipName, 'My Playlist.zip');
+    assert.equal(info.artist, 'List Owner');
+    assert.equal(info.artwork, 'https://i1.sndcdn.com/artworks-abc-t500x500.jpg');
+    assert.equal(info.truncated, false);
+    assert.deepEqual(batches, ['2,3,4'], 'only the bare ids are requested, in one batch');
+
+    assert.deepEqual(
+      info.tracks.map((t) => [t.position, t.id, t.title, t.downloadable]),
+      [[1, 1, 'Song 1', true], [2, 2, 'Song 2', true], [3, 3, 'Song 3', false], [4, 4, 'Song 4', true]]
+    );
+    assert.equal(info.tracks[1].filename, 'Other Artist - Song 2.mp3');
+    assert.match(info.tracks[2].reason, /30 second preview/);
+  } finally {
+    restore();
+  }
+});
+
+test('lookup caps a playlist at 50 tracks and says so', async () => {
+  sc.resetClientIdCache();
+  const { playlist, tracksById } = playlistFixture(60);
+  const batches = [];
+  const restore = installFakeSoundCloud({
+    track: playlist,
+    tracksById,
+    onRequest: (url) => {
+      if (url.pathname === '/tracks') batches.push(url.searchParams.get('ids').split(',').length);
+    },
+  });
+  try {
+    const info = await sc.lookup('https://soundcloud.com/list-owner/sets/big');
+    assert.equal(info.tracks.length, sc.MAX_PLAYLIST_TRACKS);
+    assert.equal(info.totalTracks, 60);
+    assert.equal(info.truncated, true);
+    assert.deepEqual(batches, [49], 'one request for the 49 bare ids, none for the 10 cut off');
+  } finally {
+    restore();
+  }
+});
+
+test('lookup drops playlist tracks that SoundCloud no longer returns', async () => {
+  sc.resetClientIdCache();
+  const { playlist, tracksById } = playlistFixture(3);
+  delete tracksById[2]; // deleted since the playlist was made
+  const restore = installFakeSoundCloud({ track: playlist, tracksById });
+  try {
+    const info = await sc.lookup('https://soundcloud.com/list-owner/sets/gappy');
+    assert.deepEqual(info.tracks.map((t) => t.id), [1, 3]);
+  } finally {
+    restore();
+  }
+});
+
+test('lookup still answers for a single track and refuses profiles', async () => {
+  sc.resetClientIdCache();
+  const restore = installFakeSoundCloud({ track: makeTrack([hlsMp3]) });
+  try {
+    assert.equal((await sc.lookup('https://soundcloud.com/a/b')).kind, 'track');
+  } finally {
+    restore();
+  }
+  sc.resetClientIdCache();
+  const restoreUser = installFakeSoundCloud({ track: { kind: 'user' } });
+  try {
+    await assert.rejects(sc.lookup('https://soundcloud.com/a'), /not a track or a playlist/);
+  } finally {
+    restoreUser();
+  }
+});
+
+test('GET /api/download?id= streams a playlist track by id', async () => {
+  sc.resetClientIdCache();
+  const audio = [0, 1].map((n) => Buffer.alloc(40, n + 7));
+  const { tracksById } = playlistFixture(2);
+  const restore = installFakeSoundCloud({ track: {}, tracksById, segments: audio });
+  const server = await serve(downloadHandler);
+  try {
+    const res = await get(server.address().port, '/api/download?id=2');
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-disposition'], /^attachment; filename="Other Artist - Song 2\.mp3"/);
+    assert.deepEqual(res.body, Buffer.concat(audio));
+  } finally {
+    server.close();
+    restore();
+  }
+});
+
+test('GET /api/download?id= rejects bad ids and reports missing tracks', async () => {
+  sc.resetClientIdCache();
+  const restore = installFakeSoundCloud({ track: {}, tracksById: {} });
+  const server = await serve(downloadHandler);
+  try {
+    const port = server.address().port;
+    const bad = await get(port, '/api/download?id=' + encodeURIComponent('1/../../secret'));
+    assert.equal(bad.status, 400);
+    const missing = await get(port, '/api/download?id=999');
+    assert.equal(missing.status, 404);
   } finally {
     server.close();
     restore();
