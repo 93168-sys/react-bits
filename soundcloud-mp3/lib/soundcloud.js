@@ -1,6 +1,7 @@
 'use strict';
 
 const { Readable } = require('node:stream');
+const { convertToMp3, ConvertError } = require('./convert');
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -213,24 +214,37 @@ async function loadPlaylistTracks(playlist) {
   return entries.map((t) => (t.media ? t : byId.get(t.id))).filter(Boolean);
 }
 
-// Chooses which stream to download: a full-length MP3, progressive first
-// (one plain file), HLS second (many small pieces we stitch together).
+const isMp3Mime = (mime) => /^audio\/mpeg\s*(;|$)/i.test(mime ?? '');
+const isAacMime = (mime) => /^audio\/mp4\b/i.test(mime ?? '') && /mp4a/i.test(mime ?? '');
+const aacBitrate = (t) => Number(/aac_(\d+)k/i.exec(t.preset ?? '')?.[1] ?? 0);
+
+// Chooses which stream to download, best first:
+//   1. a full-length MP3 file (progressive)
+//   2. an MP3 in HLS pieces that we stitch together
+//   3. AAC in HLS pieces, which we convert to MP3 with ffmpeg
+// "audio/mpegurl" (SoundCloud's adaptive playlist) looks like MP3 but is not.
 function pickTranscoding(track) {
-  const transcodings = track.media?.transcodings ?? [];
-  const mp3 = transcodings.filter((t) => t?.url && /^audio\/mpeg/i.test(t.format?.mime_type ?? ''));
-  const full = mp3.filter((t) => !t.snipped);
+  const usable = (track.media?.transcodings ?? []).filter((t) => {
+    if (!t?.url) return false;
+    const { protocol, mime_type: mime } = t.format ?? {};
+    if (protocol === 'progressive') return isMp3Mime(mime);
+    return protocol === 'hls' && (isMp3Mime(mime) || isAacMime(mime));
+  });
+  const full = usable.filter((t) => !t.snipped);
 
   const chosen =
-    full.find((t) => t.format?.protocol === 'progressive') ?? full.find((t) => t.format?.protocol === 'hls');
+    full.find((t) => t.format.protocol === 'progressive') ??
+    full.find((t) => t.format.protocol === 'hls' && isMp3Mime(t.format.mime_type)) ??
+    full.filter((t) => isAacMime(t.format.mime_type)).sort((a, b) => aacBitrate(b) - aacBitrate(a))[0];
   if (chosen) return chosen;
 
-  if (mp3.length > 0 && full.length === 0) {
+  if (usable.length > 0) {
     throw new ScError(
       'SoundCloud only offers a 30 second preview of this track (Go+ or region locked), so it cannot be downloaded.',
       422
     );
   }
-  throw new ScError('This track has no downloadable MP3 stream.', 422);
+  throw new ScError('This track has no audio stream that can be downloaded.', 422);
 }
 
 function upgradeArtwork(artworkUrl) {
@@ -382,7 +396,9 @@ function createSegmentFetcher(urls) {
   };
 }
 
-async function openHls(playlistUrl) {
+// Reads an HLS playlist: the list of piece URLs, plus the "init" piece that
+// MP4 based streams need before the first one.
+async function loadHlsPlaylist(playlistUrl) {
   let base = playlistUrl;
   let text = await fetchText(base);
 
@@ -393,9 +409,19 @@ async function openHls(playlistUrl) {
     assertTrusted(base);
     text = await fetchText(base);
   }
+  if (/#EXT-X-KEY:(?![^\n]*METHOD=NONE)/.test(text)) {
+    throw new ScError('This track is copy protected and cannot be downloaded.', 422);
+  }
 
   const urls = parsePlaylist(text, base);
   if (urls.length === 0) throw new ScError('SoundCloud sent an empty stream list.', 502);
+
+  const map = /#EXT-X-MAP:[^\n]*URI="([^"]+)"/.exec(text);
+  return { urls, initUrl: map ? new URL(map[1], base).toString() : null };
+}
+
+async function openHls(playlistUrl) {
+  const { urls } = await loadHlsPlaylist(playlistUrl);
 
   const next = createSegmentFetcher(urls);
   const first = await next(); // fail now, before any response headers go out
@@ -407,10 +433,34 @@ async function openHls(playlistUrl) {
   return { body: Readable.from(chunks(), { objectMode: false }), contentLength: null };
 }
 
+// AAC streams cannot be stitched into an MP3 by joining bytes. Fetch the
+// pieces in order, hand them to ffmpeg, and stream out what it encodes.
+async function openAacAsMp3(playlistUrl, tags) {
+  const { urls, initUrl } = await loadHlsPlaylist(playlistUrl);
+  const next = createSegmentFetcher(urls);
+
+  async function* pieces() {
+    if (initUrl) yield await fetchSegment(initUrl);
+    for (let chunk = await next(); chunk !== null; chunk = await next()) yield chunk;
+  }
+
+  try {
+    return { body: await convertToMp3(pieces(), tags), contentLength: null };
+  } catch (err) {
+    if (!(err instanceof ConvertError)) throw err;
+    console.error(err.message);
+    throw new ScError('Could not convert this track to MP3.', 502);
+  }
+}
+
 async function openMp3Stream(track) {
   const transcoding = pickTranscoding(track);
   const streamUrl = await getStreamUrl(track, transcoding);
-  return transcoding.format.protocol === 'progressive' ? openProgressive(streamUrl) : openHls(streamUrl);
+  const { protocol, mime_type: mime } = transcoding.format;
+
+  if (protocol === 'progressive') return openProgressive(streamUrl);
+  if (isMp3Mime(mime)) return openHls(streamUrl);
+  return openAacAsMp3(streamUrl, { title: track.title, artist: track.user?.username });
 }
 
 // ---------------------------------------------------------------------------

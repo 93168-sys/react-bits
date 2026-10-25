@@ -17,6 +17,7 @@ function installFakeSoundCloud({
   tracksById = {},
   segments = [],
   progressiveBody = null,
+  aacFiles = null, // { playlist: string, files: { 'init.mp4': Buffer, 'seg0.m4s': Buffer, ... } }
   onRequest = () => {},
 }) {
   const realFetch = globalThis.fetch;
@@ -45,6 +46,10 @@ function installFakeSoundCloud({
       if (url.pathname.endsWith('/stream/progressive')) {
         return Response.json({ url: 'https://cf-media.sndcdn.com/file.mp3' });
       }
+      if (url.pathname.endsWith('/stream/aac')) {
+        return Response.json({ url: 'https://playback.media-streaming.soundcloud.cloud/aac/playlist.m3u8?expires=1' });
+      }
+      if (url.pathname.endsWith('/stream/mpegurl')) return Response.json({}, { status: 404 });
       if (url.pathname.endsWith('/stream/hls')) {
         return Response.json({ url: 'https://playback.media-streaming.soundcloud.cloud/abc/playlist.m3u8' });
       }
@@ -57,6 +62,12 @@ function installFakeSoundCloud({
       segments.forEach((_, i) => lines.push('#EXTINF:10.0,', `seg${i}.mp3`));
       lines.push('#EXT-X-ENDLIST');
       return new Response(lines.join('\n'));
+    }
+    if (aacFiles && url.origin === 'https://playback.media-streaming.soundcloud.cloud' && url.pathname.startsWith('/aac/')) {
+      const name = url.pathname.slice('/aac/'.length);
+      if (name === 'playlist.m3u8') return new Response(aacFiles.playlist);
+      if (aacFiles.files[name]) return new Response(aacFiles.files[name]);
+      return new Response('missing', { status: 404 });
     }
     const seg = /^https:\/\/playback\.media-streaming\.soundcloud\.cloud\/abc\/seg(\d+)\.mp3$/.exec(url.href);
     if (seg) {
@@ -107,4 +118,22 @@ const hlsOpus = {
   format: { protocol: 'hls', mime_type: 'audio/ogg; codecs="opus"' },
 };
 
-module.exports = { CLIENT_ID, id3Tag, installFakeSoundCloud, makeTrack, hlsMp3, progressiveMp3, hlsOpus };
+// What SoundCloud really sends for most tracks today: two AAC streams and an
+// adaptive playlist labelled audio/mpegurl (which 404s when asked for).
+const aac160 = {
+  url: 'https://api-v2.soundcloud.com/media/soundcloud:tracks:1/abc/stream/aac',
+  preset: 'aac_160k',
+  snipped: false,
+  format: { protocol: 'hls', mime_type: 'audio/mp4; codecs="mp4a.40.2"' },
+  quality: 'sq',
+};
+const aac96 = { ...aac160, url: aac160.url.replace('/abc/', '/def/'), preset: 'aac_96k', quality: 'lq' };
+const abrSq = {
+  url: 'https://api-v2.soundcloud.com/media/soundcloud:tracks:1/abc/stream/mpegurl',
+  preset: 'abr_sq',
+  snipped: false,
+  format: { protocol: 'hls', mime_type: 'audio/mpegurl' },
+  quality: 'sq',
+};
+
+module.exports = { aac160, aac96, abrSq, CLIENT_ID, id3Tag, installFakeSoundCloud, makeTrack, hlsMp3, progressiveMp3, hlsOpus };

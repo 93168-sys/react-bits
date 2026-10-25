@@ -7,7 +7,7 @@ const http = require('node:http');
 const sc = require('../lib/soundcloud');
 const infoHandler = require('../api/info');
 const downloadHandler = require('../api/download');
-const { id3Tag, installFakeSoundCloud, makeTrack, hlsMp3, progressiveMp3, hlsOpus } = require('./helpers');
+const { id3Tag, installFakeSoundCloud, makeTrack, hlsMp3, progressiveMp3, hlsOpus, aac160, aac96, abrSq } = require('./helpers');
 
 // --- pure helpers ---------------------------------------------------------
 
@@ -64,10 +64,22 @@ test('pickTranscoding prefers progressive MP3, then HLS MP3', () => {
   assert.equal(sc.pickTranscoding(makeTrack([hlsOpus, hlsMp3])), hlsMp3);
 });
 
-test('pickTranscoding explains preview-only and no-MP3 tracks', () => {
+test('pickTranscoding explains preview-only and unsupported tracks', () => {
   assert.throws(() => sc.pickTranscoding(makeTrack([{ ...hlsMp3, snipped: true }])), /30 second preview/);
-  assert.throws(() => sc.pickTranscoding(makeTrack([hlsOpus])), /no downloadable MP3/);
-  assert.throws(() => sc.pickTranscoding(makeTrack([])), /no downloadable MP3/);
+  assert.throws(() => sc.pickTranscoding(makeTrack([{ ...aac160, snipped: true }])), /30 second preview/);
+  assert.throws(() => sc.pickTranscoding(makeTrack([hlsOpus])), /no audio stream/);
+  assert.throws(() => sc.pickTranscoding(makeTrack([])), /no audio stream/);
+});
+
+test('pickTranscoding falls back to the best AAC stream when there is no MP3', () => {
+  assert.equal(sc.pickTranscoding(makeTrack([aac96, aac160])), aac160);
+  assert.equal(sc.pickTranscoding(makeTrack([aac96, hlsMp3, aac160])), hlsMp3, 'MP3 still beats AAC');
+});
+
+test('pickTranscoding never picks audio/mpegurl, which only looks like MP3', () => {
+  // Real tracks list this one last and SoundCloud answers 404 when it is requested.
+  assert.equal(sc.pickTranscoding(makeTrack([aac160, aac96, abrSq])), aac160);
+  assert.throws(() => sc.pickTranscoding(makeTrack([abrSq])), /no audio stream/);
 });
 
 // --- request flow against the fake SoundCloud -----------------------------

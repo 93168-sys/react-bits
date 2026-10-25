@@ -9,5 +9,8 @@
   "scripts": {
     "start": "node dev/server.js",
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0"
   }
 }
